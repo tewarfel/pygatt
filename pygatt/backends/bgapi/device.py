@@ -83,6 +83,9 @@ class BGAPIBLEDevice(BLEDevice):
 
         self._backend.expect(ResponsePacketType.attclient_read_by_handle)
         success = False
+        if timeout==None:
+            timeout = 2
+
         while not success:
             matched_packet_type, response = self._backend.expect_any(
                 [EventPacketType.attclient_attribute_value,

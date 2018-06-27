@@ -1,14 +1,15 @@
-from __future__ import print_function
+#from __future__ import print_function
 
 
 # for Python 2/3 compatibility
 try:
-    import queue
+    import queue #queue
 except ImportError:
-    import Queue as queue
+    import Queue as queue #Queue as queue
 
 import logging
 import serial
+import serial.serialposix
 import time
 import threading
 from binascii import hexlify, unhexlify
@@ -37,6 +38,13 @@ else:
     serial_exception = termios.error
 
 
+local_scan_response_data_type ={}
+for i in range(256):
+    local_scan_response_data_type[i]="__undefined__"
+for k in constants.scan_response_data_type.keys():
+    local_scan_response_data_type[k] = constants.scan_response_data_type[k]
+
+
 log = logging.getLogger(__name__)
 
 BLED112_VENDOR_ID = 0x2458
@@ -45,8 +53,7 @@ MAX_CONNECTION_ATTEMPTS = 10
 
 
 UUIDType = Enum('UUIDType', ['custom', 'service', 'attribute',
-                             'descriptor', 'characteristic',
-                             'nonstandard'])
+                             'descriptor', 'characteristic'])
 
 
 def _timed_out(start_time, timeout):
@@ -155,20 +162,30 @@ class BGAPIBackend(BLEBackend):
             try:
                 serial_port = self._serial_port or self._detect_device_port()
                 self._ser = None
-
-                self._ser = serial.Serial(serial_port, baudrate=115200,
-                                          timeout=0.25)
-                # Wait until we can actually read from the device
-                self._ser.read()
-                break
-            except (BGAPIError, serial.serialutil.SerialException,
-                    serial_exception):
+                for lattempt in range(MAX_CONNECTION_ATTEMPTS):
+                  try:
+                    self._ser = serial.Serial(serial_port, baudrate=115200, timeout=0.25)
+                    break
+                  except (BGAPIError, serial.serialutil.SerialException, serial_exception):
+                    time.sleep(0.25)
+                try:
+                  # Wait until we can actually read from the device
+                  self._ser.read()
+                  break
+                except (BGAPIError, serial.serialutil.SerialException,
+                        serial_exception):
+                  if self._ser:
+                    self._ser.close()
+                  elif attempt == 0:
+                    raise NotConnectedError( "No BGAPI compatible device detected")
+                    self._ser = None
+                    time.sleep(0.5)
+            except (BGAPIError, serial.serialutil.SerialException, serial_exception):
                 log.debug("Failed to open serial port", exc_info=True)
                 if self._ser:
                     self._ser.close()
                 elif attempt == 0:
-                    raise NotConnectedError(
-                        "No BGAPI compatible device detected")
+                    raise NotConnectedError( "No BGAPI compatible device detected")
                 self._ser = None
                 time.sleep(0.25)
         else:
@@ -185,7 +202,7 @@ class BGAPIBackend(BLEBackend):
 
         # Fail immediately if no device is attached, don't retry waiting for one
         # to be plugged in.
-        self._open_serial_port(max_connection_attempts=1)
+        self._open_serial_port(max_connection_attempts=10)
 
         log.info("Resetting and reconnecting to device for a clean environment")
         # Blow everything away and start anew.
@@ -305,6 +322,7 @@ class BGAPIBackend(BLEBackend):
         active -- True --> ask sender for scan response data. False --> don't.
         discover_mode -- one of the gap_discover_mode constants.
         """
+
         parameters = 1 if active else 0
         # NOTE: the documentation seems to say that the times are in units of
         # 625us but the ranges it gives correspond to units of 1ms....
@@ -315,28 +333,35 @@ class BGAPIBackend(BLEBackend):
 
         self.expect(ResponsePacketType.gap_set_scan_parameters)
 
-        log.info("Starting an %s scan", "active" if active else "passive")
+        log.info("Starting an %s scan" % ("an active" if active else "a passive"))
         self.send_command(CommandBuilder.gap_discover(discover_mode))
 
         self.expect(ResponsePacketType.gap_discover)
 
-        log.info("Pausing for %ds to allow scan to complete", timeout)
+        log.info("Pausing for %ds to allow scan to complete" % timeout)
         time.sleep(timeout)
 
         log.info("Stopping scan")
         self.send_command(CommandBuilder.gap_end_procedure())
-        self.expect(ResponsePacketType.gap_end_procedure)
 
+        if not self.expect(ResponsePacketType.gap_end_procedure):
+            print("Error - expect returned 0")
+
+        discovered_things = self._devices_discovered
+        self._devices_discovered = {}
+        
         devices = []
-        for address, info in self._devices_discovered.items():
+        # make a copy so we don't have it changing dynamically on us later; there is a potential race condition here depending on threading model used
+
+        for address, info in discovered_things.items():
             devices.append({
                 'address': address,
                 'name': info.name,
                 'rssi': info.rssi,
                 'packet_data': info.packet_data
             })
-        log.info("Discovered %d devices: %s", len(devices), devices)
-        self._devices_discovered = {}
+
+        log.info("Discovered %d devices: " % len(devices))
         return devices
 
     def _end_procedure(self):
@@ -470,9 +495,8 @@ class BGAPIBackend(BLEBackend):
             return UUIDType.descriptor
         if uuid in constants.gatt_characteristic_type_uuid.values():
             return UUIDType.characteristic
-
-        log.warn("Unrecognized 4 byte UUID %s", hexlify(uuid))
-        return UUIDType.nonstandard
+        log.warn("UUID %s is of unknown type", hexlify(uuid))
+        return None
 
     def _scan_rsp_data(self, data):
         """
@@ -485,6 +509,7 @@ class BGAPIBackend(BLEBackend):
         Returns a name and a dictionary containing the parsed data in pairs of
         field_name': value.
         """
+
         # Result stored here
         data_dict = {
             # 'name': value,
@@ -504,9 +529,10 @@ class BGAPIBackend(BLEBackend):
                 bytes_left_in_field -= 1
                 if bytes_left_in_field == 0:
                     # End of field
-                    field_name = (
-                        constants.scan_response_data_type[field_value[0]])
+                    field_name = (local_scan_response_data_type[field_value[0]])
+                      #  constants.scan_response_data_type[field_value[0]])
                     field_value = field_value[1:]
+
                     # Field type specific formats
                     if (field_name == 'complete_local_name' or
                             field_name == 'shortened_local_name'):
@@ -532,6 +558,7 @@ class BGAPIBackend(BLEBackend):
 
     def expect(self, expected, *args, **kargs):
         return self.expect_any([expected], *args, **kargs)
+
 
     def expect_any(self, expected_packet_choices, timeout=None,
                    assert_return_success=True):
@@ -575,6 +602,7 @@ class BGAPIBackend(BLEBackend):
 
             packet_type, response = self._lib.decode_packet(packet)
             return_code = response.get('result', 0)
+
             log.debug("Received a %s packet: %s",
                       packet_type, get_return_message(return_code))
 
@@ -583,6 +611,8 @@ class BGAPIBackend(BLEBackend):
 
             if packet_type in expected_packet_choices:
                 return packet_type, response
+
+
 
     def _receive(self):
         """
@@ -630,8 +660,6 @@ class BGAPIBackend(BLEBackend):
         and characteristic UUID ('uuid')
         """
         raw_uuid = bytearray(reversed(args['uuid']))
-
-        # Convert 4-byte UUID shorthand to a full, 16-byte UUID
         uuid_type = self._get_uuid_type(raw_uuid)
         if uuid_type != UUIDType.custom:
             uuid = uuid16_to_uuid(int(
@@ -645,14 +673,11 @@ class BGAPIBackend(BLEBackend):
                 self._current_characteristic is not None):
             self._current_characteristic.add_descriptor(uuid, args['chrhandle'])
         elif (uuid_type == UUIDType.custom or
-                uuid_type == UUIDType.nonstandard or
                 uuid_type == UUIDType.characteristic):
             if uuid_type == UUIDType.custom:
                 log.info("Found custom characteristic %s" % uuid)
             elif uuid_type == UUIDType.characteristic:
                 log.info("Found approved characteristic %s" % uuid)
-            elif uuid_type == UUIDType.nonstandard:
-                log.info("Found nonstandard 4-byte characteristic %s" % uuid)
             new_char = Characteristic(uuid, args['chrhandle'])
             self._current_characteristic = new_char
             self._characteristics[
@@ -703,6 +728,8 @@ class BGAPIBackend(BLEBackend):
                 type ('address_type'), existing bond handle ('bond'), and
                 scan resonse data list ('data')
         """
+
+
         # Parse packet
         packet_type = constants.scan_response_packet_type[args['packet_type']]
         address = bgapi_address_to_hex(args['sender'])
@@ -711,10 +738,11 @@ class BGAPIBackend(BLEBackend):
         # Store device information
         if address not in self._devices_discovered:
             self._devices_discovered[address] = AdvertisingAndScanInfo()
+
         dev = self._devices_discovered[address]
-        if dev.name == "":
+        if (dev.name == "") and (name != ""):
             dev.name = name
-        if dev.address == "":
+        if (dev.address == "") and (address != ""):
             dev.address = address
         if (packet_type not in dev.packet_data or
                 len(dev.packet_data[packet_type]) < len(data_dict)):

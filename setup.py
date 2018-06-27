@@ -26,7 +26,8 @@ setup(
     url='https://github.com/peplin/pygatt',
     install_requires=[
         'pyserial',
-        'enum-compat'
+        'enum-compat',
+        'pexpect'
     ],
     setup_requires=[
         'coverage >= 3.7.1',
